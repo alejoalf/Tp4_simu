@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Simulación Vacunatorio – TP4</title>
+<style>
+:root{--bg:#f7f7f5;--fg:#1c1c1a;--card:#fff;--bd:#d0d0c9;--ac:#1b6ca8;--hd:#e3ebf1;--sel:#ffe49a;--fin:#dff2e1;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#17181a;--fg:#e8e8e4;--card:#212326;--bd:#3a3d41;--ac:#6db3e8;--hd:#2a3038;--sel:#5f4d10;--fin:#1f3a24}}
+:root[data-theme="dark"]{--bg:#17181a;--fg:#e8e8e4;--card:#212326;--bd:#3a3d41;--ac:#6db3e8;--hd:#2a3038;--sel:#5f4d10;--fin:#1f3a24}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;padding:12px;background:var(--bg);color:var(--fg);font:14px system-ui,sans-serif}
+h1{font-size:18px;margin:0 0 8px}h2{font-size:14px;margin:0 0 6px;color:var(--ac)}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:10px;margin-bottom:10px}
+#params{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:6px 10px}
+label{display:flex;flex-direction:column;font-size:12px;gap:2px}
+input{padding:4px;border:1px solid var(--bd);border-radius:4px;background:var(--bg);color:var(--fg);font:inherit}
+button{margin-top:8px;padding:8px 18px;border:0;border-radius:6px;background:var(--ac);color:#fff;font:inherit;font-weight:600;cursor:pointer}
+#res{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:6px 12px}
+.k b{display:block;font-size:17px}.k span{font-size:12px;opacity:.8}
+#wrap{height:62vh;overflow:auto;border:1px solid var(--bd);border-radius:6px;background:var(--card)}
+table{border-collapse:separate;border-spacing:0;font-size:12px;white-space:nowrap}
+th,td{padding:2px 6px;border-right:1px solid var(--bd);border-bottom:1px solid var(--bd);text-align:right}
+th{position:sticky;background:var(--hd);height:22px;text-align:center;z-index:2}
+thead tr:first-child th{top:0}thead tr:nth-child(2) th{top:23px}
+td:nth-child(2){text-align:left}tbody tr{cursor:pointer}
+tbody tr.sel td{background:var(--sel)}tbody tr.fin td{background:var(--fin);font-weight:600}
+#msg{font-size:12px;margin-top:6px}
+</style></head><body>
+<h1>Simulación del vacunatorio (TP4)</h1>
+<div class="card"><h2>Parámetros</h2><div id="params"></div><button id="go">Simular</button><div id="msg"></div></div>
+<div class="card"><h2>Resultados</h2><div id="res"></div></div>
+<div class="card"><h2>Vector de estado <small>(clic en una fila para seleccionarla)</small></h2><div id="wrap"><table id="vt"></table></div></div>
+<script>
+const P=[['T','Tiempo a simular (hs)',24],['maxIt','Máx. iteraciones (≤100000)',100000],['i','Mostrar i iteraciones',30],['j','Desde la hora j (hs)',0],
+['cntC','COVID: llegadas por intervalo',4],['perC','COVID: intervalo (min)',15],['mF','Gripe: media entre llegadas (min)',5],['gmin','Grupo mínimo',1],['gmax','Grupo máximo',4],
+['dC','Dosis por caja COVID',5],['minC','Pacientes mín. para abrir caja COVID',5],['dF','Dosis por caja gripe',10],['tv','Vencimiento caja gripe Tv (hs)',2],['seg','Segundos por paciente',22],
+['seed','Semilla',1234],['a','Multiplicador a',1714],['c','Constante aditiva c',1221],['m','Módulo m',3922]];
+$p=document.getElementById('params');
+P.forEach(([k,l,v])=>$p.insertAdjacentHTML('beforeend','<label>'+l+'<input id="p_'+k+'" type="number" step="any" value="'+v+'"></label>'));
+const fmt=m=>{let s=Math.round(m*60),h=Math.floor(s/3600);s-=h*3600;return h+':'+String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0')};
+const f=(v,d=3)=>v==null||v===''?'':v===Infinity?'—':(+v).toFixed(d);
+function render(S){
+ const used=(rows,key)=>Math.max(0,...rows.map(s=>s[key]?s[key].map(g=>!!g).lastIndexOf(true)+1:0));
+ const mc=used(S.rows,'tc'),mf=used(S.rows,'tf');
+ const C=[['','Fila',s=>s.n],['','Evento',s=>s.ev],['','Reloj (min)',s=>f(s.t)],['','Hora',s=>fmt(s.t)],
+ ['Llegada COVID','RND tam.',s=>f(s.R.sC,4)],['Llegada COVID','Tamaño',s=>s.R.sCn],['Llegada COVID','RND t.',s=>f(s.R.C,4)],['Llegada COVID','Entre llegadas',s=>f(s.R.Ct)],['Llegada COVID','Próx. llegada',s=>f(s.nc)],
+ ['Llegada gripe','RND tam.',s=>f(s.R.sF,4)],['Llegada gripe','Tamaño',s=>s.R.sFn],['Llegada gripe','RND t.',s=>f(s.R.F,4)],['Llegada gripe','Entre llegadas',s=>f(s.R.Ft)],['Llegada gripe','Próx. llegada',s=>f(s.nf)],
+ ['Próximos eventos','Fin atención',s=>s.fin==null?'—':f(s.fin)],['Próximos eventos','Venc. caja',s=>s.ven==null?'—':f(s.ven)],
+ ['Enfermero','Estado',s=>s.st],['Enfermero','Próx. turno',s=>s.turn],['Enfermero','Lote N',s=>s.lote],
+ ['Colas','Grupos COVID',s=>s.gC],['Colas','Pac. COVID pend.',s=>s.pC],['Colas','Grupos gripe',s=>s.gF],['Colas','Pac. gripe',s=>s.pF],
+ ['Caja gripe','Dosis restantes',s=>s.box],
+ ['Acumuladores','Cajas COVID',s=>s.A.cajasC],['Acumuladores','Cajas gripe',s=>s.A.cajasF],['Acumuladores','Dosis desechadas',s=>s.A.desech],['Acumuladores','Pac. COVID vac.',s=>s.A.pacC],['Acumuladores','Pac. gripe vac.',s=>s.A.pacF],
+ ['Acumuladores','Grupos COVID retirados',s=>s.A.gC],['Acumuladores','Grupos con espera',s=>s.A.gP],['Acumuladores','Σ espera parcial (min)',s=>f(s.A.sP)],['Acumuladores','Σ espera todos (min)',s=>f(s.A.sA)]];
+ for(let k=0;k<mc;k++)['Id','Tam.','Vac.','En lote','Estado','Llegada','1ª dosis'].forEach((l,q)=>C.push(['Grupo COVID '+(k+1),l,s=>{const g=s.tc&&s.tc[k];return g?(q>4?f(g[q],2):g[q]):''}]));
+ for(let k=0;k<mf;k++)['Id','Tam.','Estado','Llegada'].forEach((l,q)=>C.push(['Grupo gripe '+(k+1),l,s=>{const g=s.tf&&s.tf[k];return g?(q>2?f(g[q],2):g[q]):''}]));
+ let h1='',h2='',i=0;
+ while(i<C.length){let j=i;while(j<C.length&&C[j][0]===C[i][0])j++;h1+='<th colspan="'+(j-i)+'">'+C[i][0]+'</th>';i=j}
+ C.forEach(c=>h2+='<th>'+c[1]+'</th>');
+ const body=[...S.rows,S.last].map((s,r)=>'<tr'+(r===S.rows.length?' class="fin"':'')+'>'+C.map(c=>'<td>'+(c[2](s)??'')+'</td>').join('')+'</tr>').join('');
+ document.getElementById('vt').innerHTML='<thead><tr>'+h1+'</tr><tr>'+h2+'</tr></thead><tbody>'+body+'</tbody>';
+}
+document.getElementById('vt').addEventListener('click',e=>{const r=e.target.closest('tbody tr');if(r)r.classList.toggle('sel')});
+document.getElementById('go').onclick=async()=>{
+ const p={};P.forEach(([k])=>p[k]=parseFloat(document.getElementById('p_'+k).value));
+ p.maxIt=Math.min(100000,Math.max(1,p.maxIt));p.i=Math.min(p.i,p.maxIt);
+ const r=await fetch('/api/simular',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});
+ if(!r.ok){document.getElementById('msg').textContent='Parámetros inválidos: revisá que no haya campos vacíos.';return}
+ const S=await r.json(),A=S.A,pp=A.gP?A.sP/A.gP:0,pa=A.gC?A.sA/A.gC:0,per=S.periodo;
+ const K=[[A.cajasC,'Cajas de vacuna COVID utilizadas'],[f(pp)+' min ('+fmt(pp)+')','Espera promedio de grupos con vacunación parcial ('+A.gP+' grupos)'],[f(pa)+' min','Espera promedio sobre todos los grupos COVID retirados ('+A.gC+')'],
+ [A.cajasF,'Cajas de gripe abiertas'],[A.desech,'Dosis de gripe descartadas por vencimiento'],[A.pacC+' / '+A.pacF,'Pacientes vacunados COVID / gripe'],[S.n+' filas, reloj final '+fmt(S.t),S.last.ev],[per,'Período del generador (números distintos antes de repetir)']];
+ document.getElementById('res').innerHTML=K.map(k=>'<div class="k"><b>'+k[0]+'</b><span>'+k[1]+'</span></div>').join('');
+ document.getElementById('msg').textContent=S.rows.length?'Mostrando '+S.rows.length+' filas desde la hora '+p.j+' más la última fila.':'No hay filas a partir de esa hora: se muestra solo la última fila.';
+ render(S);
+};
+document.getElementById('go').click();
+</script></body></html>
