@@ -1,13 +1,27 @@
-"""TP4 Simulación – Vacunatorio.
+"""TP4 Simulación – Vacunatorio A.
 Motor de la simulación. Este archivo NO sabe nada de web: recibe parámetros y devuelve el vector de estado.
-Unidad de tiempo: minutos."""
+Unidad de tiempo: minutos.
+
+Supuestos del modelo (ver documento de la Parte A):
+- Cada aplicación de COVID abre UNA caja y vacuna exactamente 5 personas por orden de llegada (un grupo puede quedar partido).
+- Una aplicación de gripe vacuna a todos los que esperan al empezar; usa las dosis sobrantes y abre las cajas que falten.
+- La caja de gripe se abre al empezar la aplicación y vence X hs después; al vencer se descartan las dosis sobrantes.
+- Una persona queda vacunada al TERMINAR la aplicación de su lote.
+- Espera de un grupo COVID = fin del lote de su último integrante - fin del lote de su primer integrante.
+  El promedio se calcula sobre los grupos que quedaron partidos (espera > 0)."""
 import math
 
 INFINITO = math.inf   # significa "este evento no está programado"
 
+# Constantes del enunciado que no están en rojo (no se parametrizan)
+GRUPO_MIN = 1
+DOSIS_CAJA_COVID = 5      # además, es el mínimo de pacientes para abrir una caja COVID
+DOSIS_CAJA_GRIPE = 10
+
 
 class GeneradorCongruencial:
-    """Congruencial mixto: x(n+1) = (a * x(n) + c) mod m   y   RND = x / m  (queda en [0,1))."""
+    """Congruencial mixto: x(n+1) = (a * x(n) + c) mod m   y   RND = x / m  (queda en [0,1)).
+    La semilla no se usa como RND: el primer número usado es x1 / m."""
 
     def __init__(self, semilla, a, c, m):
         self.x, self.a, self.c, self.m = semilla, a, c, m
@@ -15,16 +29,6 @@ class GeneradorCongruencial:
     def siguiente(self):
         self.x = (self.a * self.x + self.c) % self.m
         return self.x / self.m
-
-
-def periodo_del_generador(semilla, a, c, m):
-    """Cuántos valores distintos genera antes de empezar a repetirse."""
-    vistos, x, paso = {}, semilla, 0
-    while x not in vistos:
-        vistos[x] = paso
-        paso += 1
-        x = (a * x + c) % m
-    return paso - vistos[x]
 
 
 class Grupo:
@@ -36,7 +40,7 @@ class Grupo:
         self.hora_llegada = hora_llegada
         self.vacunados = 0                 # integrantes que ya recibieron la dosis
         self.en_lote = 0                   # integrantes que se están vacunando en la aplicación actual
-        self.hora_primera_dosis = None     # cuándo recibió la primera dosis el primer integrante
+        self.hora_primera_dosis = None     # cuándo recibió la dosis el primer integrante (solo COVID)
         self.estado = 'En cola'            # En cola / Siendo vacunado / Esperando resto
         self.columna = None                # columna que ocupa en el vector de estado (solo para mostrar)
 
@@ -54,11 +58,8 @@ class Simulacion:
         self.mostrar_desde = p['j'] * 60                     # horas -> minutos
         self.media_llegada_covid = p['perC'] / p['cntC']     # "4 veces cada 15 min" -> media 3,75 min
         self.media_llegada_gripe = p['mF']
-        self.grupo_min, self.grupo_max = int(p['gmin']), int(p['gmax'])
-        self.dosis_caja_covid = int(p['dC'])
-        self.min_pacientes_covid = p['minC']                 # pacientes necesarios para abrir una caja COVID
-        self.dosis_caja_gripe = int(p['dF'])
-        self.vencimiento_gripe = p['tv'] * 60                # horas -> minutos
+        self.grupo_max = int(p['gmax'])
+        self.vencimiento_gripe = p['X'] * 60                 # horas -> minutos
         self.segundos_por_paciente = p['seg']
         self.generador = GeneradorCongruencial(int(p['seed']), int(p['a']), int(p['c']), int(p['m']))
 
@@ -68,8 +69,8 @@ class Simulacion:
         self.proxima_llegada_covid = INFINITO
         self.proxima_llegada_gripe = INFINITO
         self.fin_atencion = INFINITO                         # cuándo termina la aplicación en curso
-        self.cola_covid = []                                 # grupos COVID esperando (orden de llegada)
-        self.cola_gripe = []                                 # grupos de gripe esperando
+        self.cola_covid = []                                 # grupos COVID en el sistema (orden de llegada)
+        self.cola_gripe = []                                 # grupos de gripe en el sistema
         self.dosis_gripe_abierta = 0                         # dosis sobrantes de la caja de gripe abierta
         self.vencimiento_caja = INFINITO                     # cuándo vencen esas dosis
         self.enfermero_estado = 'Libre'                      # Libre / Aplicando COVID / Aplicando GRIPE
@@ -79,14 +80,9 @@ class Simulacion:
 
         # --- acumuladores (las claves las lee la pantalla) ---
         self.acumuladores = {
-            'cajasC': 0,      # cajas COVID abiertas
-            'cajasF': 0,      # cajas de gripe abiertas
-            'desech': 0,      # dosis de gripe descartadas por vencimiento
-            'pacC': 0, 'pacF': 0,   # pacientes vacunados
-            'gC': 0,          # grupos COVID que se retiraron completos
-            'gP': 0,          # ... de ellos, los que tuvieron vacunación parcial (espera > 0)
-            'sP': 0.0,        # suma de esperas de los grupos con vacunación parcial
-            'sA': 0.0,        # suma de esperas de todos los grupos COVID retirados
+            'cajasC': 0,      # cajas COVID colocadas
+            'gP': 0,          # grupos COVID partidos que ya se retiraron
+            'sP': 0.0,        # suma de las esperas de esos grupos (min)
         }
 
         # --- para armar la tabla (no son parte del modelo) ---
@@ -109,9 +105,9 @@ class Simulacion:
         return tiempo
 
     def tamano_de_grupo(self, clave):
-        """Uniforme discreta entre grupo_min y grupo_max: tamaño = min + parte entera de RND * cantidad de valores."""
+        """Uniforme discreta entre 1 y grupo_max: tamaño = 1 + parte entera de RND * cantidad de valores."""
         rnd = self.generador.siguiente()
-        tamano = self.grupo_min + int(rnd * (self.grupo_max - self.grupo_min + 1))
+        tamano = GRUPO_MIN + int(rnd * (self.grupo_max - GRUPO_MIN + 1))
         self.rnd_usados['s' + clave] = rnd
         self.rnd_usados['s' + clave + 'n'] = tamano
         return tamano
@@ -144,8 +140,7 @@ class Simulacion:
 
     def vencimiento_de_caja(self):
         self.evento = 'Vencimiento caja gripe'
-        self.acumuladores['desech'] += self.dosis_gripe_abierta
-        self.dosis_gripe_abierta = 0
+        self.dosis_gripe_abierta = 0                          # se descartan las dosis sobrantes
         self.vencimiento_caja = INFINITO
 
     def fin_de_atencion(self):
@@ -161,7 +156,6 @@ class Simulacion:
 
     def _terminar_aplicacion_covid(self):
         acum = self.acumuladores
-        acum['pacC'] += self.pacientes_en_lote
         for grupo in self.cola_covid:
             if grupo.en_lote == 0:
                 continue                                    # este grupo no participó de la aplicación
@@ -171,9 +165,7 @@ class Simulacion:
                 grupo.hora_primera_dosis = self.reloj       # primera vez que algún integrante recibe la dosis
             if grupo.vacunados == grupo.tamano:             # el grupo ya se puede retirar
                 espera = self.reloj - grupo.hora_primera_dosis
-                acum['gC'] += 1
-                acum['sA'] += espera
-                if espera > 0:
+                if espera > 0:                              # quedó partido entre dos o más cajas
                     acum['gP'] += 1
                     acum['sP'] += espera
             else:
@@ -183,7 +175,6 @@ class Simulacion:
             self.cola_covid.remove(grupo)
 
     def _terminar_aplicacion_gripe(self):
-        self.acumuladores['pacF'] += self.pacientes_en_lote
         for grupo in [g for g in self.cola_gripe if g.en_lote > 0]:   # los que llegaron durante la aplicación siguen esperando
             self._liberar_columna(self.columnas_gripe, grupo)
             self.cola_gripe.remove(grupo)
@@ -207,7 +198,7 @@ class Simulacion:
         self.proximo_turno = 'GRIPE' if tipo == 'COVID' else 'COVID'   # el turno siguiente es el opuesto
 
     def _elegir_tipo_de_vacuna(self):
-        hay_covid = self.pacientes_covid_pendientes() >= self.min_pacientes_covid
+        hay_covid = self.pacientes_covid_pendientes() >= DOSIS_CAJA_COVID
         hay_gripe = self.pacientes_gripe_pendientes() > 0
         if self.proximo_turno == 'COVID':
             if hay_covid:
@@ -224,7 +215,7 @@ class Simulacion:
     def _aplicar_covid(self):
         """Abre UNA caja y reparte sus dosis entre los grupos, en orden de llegada."""
         self.acumuladores['cajasC'] += 1
-        dosis_libres = self.dosis_caja_covid
+        dosis_libres = DOSIS_CAJA_COVID
         for grupo in self.cola_covid:
             if dosis_libres == 0:
                 break
@@ -232,7 +223,7 @@ class Simulacion:
             grupo.en_lote = cantidad
             grupo.estado = 'Siendo vacunado'
             dosis_libres -= cantidad
-        return self.dosis_caja_covid - dosis_libres
+        return DOSIS_CAJA_COVID - dosis_libres
 
     def _aplicar_gripe(self):
         """Vacuna a todos los que esperan; usa las dosis sobrantes y abre cajas nuevas si hace falta."""
@@ -244,9 +235,8 @@ class Simulacion:
             self.dosis_gripe_abierta -= pacientes
         else:
             faltan = pacientes - self.dosis_gripe_abierta
-            cajas_nuevas = math.ceil(faltan / self.dosis_caja_gripe)
-            self.acumuladores['cajasF'] += cajas_nuevas
-            self.dosis_gripe_abierta = cajas_nuevas * self.dosis_caja_gripe - faltan
+            cajas_nuevas = math.ceil(faltan / DOSIS_CAJA_GRIPE)
+            self.dosis_gripe_abierta = cajas_nuevas * DOSIS_CAJA_GRIPE - faltan
             self.vencimiento_caja = self.reloj + self.vencimiento_gripe   # el vencimiento cuenta desde que se abre
         if self.dosis_gripe_abierta == 0:
             self.vencimiento_caja = INFINITO                  # no quedan dosis que puedan vencer
